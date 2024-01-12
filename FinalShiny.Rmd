@@ -1,0 +1,517 @@
+---
+title: "Traffic Accidents Report"
+output:
+  html_notebook:
+    toc: true
+    toc_float: true
+author: Lexi Van Metre, Sam Veliveli, and Lucas Lisman  
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE, message=FALSE, warning=FALSE)
+```
+
+
+```{r}
+# Packages used in the project:
+library(tidyverse)
+library(plotly)
+library(ggplot2)
+library(knitr)
+library(foreign)
+library(shiny)
+library(rsconnect)
+library(sf)
+library(rjson)
+library(leaflet)
+library(geojsonio)
+library(rgdal)
+library(pacman)
+library(lubridate)
+```
+
+```{r}
+
+# The code below has been retained for reproducibility purposes. Attempting to deploy this causes shinyapps to crash.
+
+# Data used for this project and data wrangling:
+# Uploading Kaggle dataset
+#accidents_df<- read.csv("D:/ds2003/US_Accidents_Dec21_updated.csv")
+# Charlottesville subset
+## Subsetting data to all Charlottesville accidents
+#virginia_accidents<-accidents_df[accidents_df$State=="VA",]
+#charlottesville_accidents<-virginia_accidents[virginia_accidents$Airport_Code=="KCHO",]
+#write_csv(charlottesville_accidents, "cville_accidents.csv")
+# I-64 subset
+## Filtering by all accidents that occur on I-64
+#i64_street <- c("I-64 E", "I-64 W")
+#i64_accidents <- accidents_df %>% filter(Street %in% i64_street)
+#write_csv(i64_accidents, "i64-accidents.csv")
+
+charlottesville_accidents <- read_csv("cville_accidents.csv")
+## Removing uncessary rows
+charlottesville_accidents <- charlottesville_accidents[-c(1,2,9:11,13:29,31:43,45:47)]
+## Creating a new column to find duration of accident
+charlottesville_accidents<-charlottesville_accidents%>%
+  ## converting start time to a date type
+  mutate(Start_Time=as.POSIXct(Start_Time))%>%
+  ##converting end time to a date type
+  mutate(End_Time=as.POSIXct(End_Time))
+## Creating traffic duration column
+charlottesville_accidents<-charlottesville_accidents%>%
+  mutate(traffic_duration = difftime(End_Time,Start_Time,units = "hours"))
+## Converting weather to a factor
+charlottesville_accidents$Weather_Condition <- as.factor(charlottesville_accidents$Weather_Condition)
+
+head(charlottesville_accidents)
+
+
+i64_accidents <- read_csv("i64-accidents.csv")
+i64_accidents <- i64_accidents[-c(1,9:11,13:29,31:43,45:47)]
+## Creating a new column to find duration of accident
+i64_accidents<-i64_accidents%>%
+  ## converting start time to a date type
+  mutate(Start_Time=as.POSIXct(Start_Time))%>%
+  ##converting end time to a date type
+  mutate(End_Time=as.POSIXct(End_Time))
+## Creating traffic duration column
+i64_accidents<-i64_accidents%>%
+  mutate(traffic_duration = difftime(End_Time,Start_Time,units = "hours"))
+
+i64_accidents$Sunrise_Sunset <- as.factor(i64_accidents$Sunrise_Sunset)
+
+head(i64_accidents)
+```
+
+## Introduction of dataset
+
+Road traffic and accidents affect many aspects from time management to safety.
+There are many sources that collect traffic data that include US and State
+Departments of Transportation. For data science analysis, this traffic dataset
+provides valuable data on accident patterns such as weather condition and
+distance affected that gives important insights on severe and frequent accident
+conditions. 
+
+This dataset was found on [Kaggle](https://www.kaggle.com/datasets/sobhanmoosavi/us-accidents) and records 2.8 million accidents from February
+2016 to December 2021. The data is collected from APIs that stream traffic and
+accidents collected from a variety of sources such as law enforcement officers
+and traffic cameras. We used this data in our analysis to explore how the
+COVID-19 pandemic affected accident patterns, and which are the most dangerous
+conditions and roads to travel on.
+
+## Dataset Summary
+
+### Relevant columns
+
+There are 47 columns in this dataset that include both discrete and continuous data on traffic. Of the 47 columns, we used 8 which are: 
+
+ * `Start_Lat` (starting latitude): Shows latitude in GPS coordinate of the start point.
+ * `Start_Lng` (starting longitude): Shows longitude in GPS coordinate of the start point.
+ * `Start_Time`: Shows start time of the accident in the local time zone.
+ * `End_Time`: Shows end time of the accident (when the impact of accident on traffic flow was dismissed) in local time zone.
+ * `Street`: Shows the street name of the address field.
+ * `Weather_Condition`: Shows the weather condition (clear, overcast, etc.) at the time of the accident.
+ * `Sunrise_Sunset`: Shows the period of day (i.e. day or night) based on sunrise/sunset.
+ * `Severity`: Scale of 1-4 of the accident's impact on traffic delays.
+
+
+### Omitted columns
+
+We omitted 39 columns in the dataset which were:
+ 
+ * Columns that indicated whether or not there were road features (Amenity, Bump, Crossing, Give_Way, Junction, No_Exit, Railway, Roundabout, Station, Stop, Traffic_Calming, Traffic_Signal, Turning_Loop)
+ * Columns that indicated different ways to differentiate day or night (Civil_Twilight, Nautical_Twilight, Astronomical_Twilight)
+ * Other columns other than street that indicated location (Number, Side, City, County, State, Zipcode, County, Timezone, Airport_Code)
+ * Other columns other than Weather_Condition that indicated weather (Weather_Timestamp, Temperature(F), Wind_Chill(F), Humidity(%), Pressure(in), Visibility(mi), Wind_Direction, Wind_Speed(mph), Precipitation(in))
+ * ID (accident ID) and Description (accident description), and Distance(mi) (length of road affected by accident)
+ * End_Lat (latitude in GPS coordinate of the end point) and  End_Lng (longitude in GPS coordinate of the end point).
+    * Leaflet only utilizes Start_Lat & Start_Lng to construct a map 
+
+
+## Question 1 
+### How are accidents on I-64 affected by time of day and direction of travel? 
+
+```{r}
+fluidPage(
+  fluidRow(
+    column(5,
+      sliderInput("severity", label = "Severity",
+                  min = 1, max = 4, value = c(1, 4))
+    ),
+    column(2,
+      checkboxGroupInput( "direction", label = "Direction",
+        choices = c("I-64 E", "I-64 W"), selected = c("I-64 E", "I-64 W"))
+    ),
+    column(2,
+      checkboxGroupInput( "daynight", label = "Time of Day",
+        choices = c("Day", "Night"), selected = c("Day", "Night"))
+    ),
+    column(3,
+      radioButtons( "normalized", label = "Chloropleth Metric",
+        choices = c("Total accident count", "Accidents per mile"), selected = "Total accident count")
+    )
+  ),
+  
+  hr(),
+  
+  fluidRow(
+    renderLeaflet({
+      # import states shapefile
+      states <- geojsonio::geojson_read("states.geojson", what = "sp")
+      # construct dataset based on selected options
+      i64_filtered <- i64_accidents[i64_accidents$Severity >= input$severity[1], ]
+      i64_filtered <- i64_filtered[i64_filtered$Severity <= input$severity[2], ]
+      i64_filtered <- i64_filtered[i64_filtered$Street %in% input$direction, ]
+      i64_filtered <- i64_filtered[i64_filtered$Sunrise_Sunset %in% input$daynight, ]
+      # get accidents per state
+      states_sf <- states %>% st_as_sf()
+      i64_sf <- i64_filtered %>% st_as_sf(coords = c("Start_Lng", "Start_Lat"), crs = 4326)
+      data_sf_summary <- states_sf %>%
+        mutate(counts = lengths(st_intersects(., i64_sf))) %>%
+        mutate(lengths = c(40.60, 128.12, 123.33, 191.00, 297.62, 188.75)) %>%
+        mutate(permi = counts / lengths)
+      if (input$normalized == "Total accident count") {
+        data_sf_summary$plotdata <- data_sf_summary$counts
+      } else {
+        data_sf_summary$plotdata <- data_sf_summary$permi
+      }
+      cuts <- quantile(data_sf_summary$plotdata, probs = seq(0, 1, 0.125))
+      cuts <- colorBin("Reds", domain = data_sf_summary$plotdata, bins = cuts)
+      time_colors <- colorFactor("Dark2", i64_filtered$Sunrise_Sunset)
+      # leaflet map
+      m <- leaflet(states) %>%
+        setView(-85, 39, 6) %>%
+        addProviderTiles("CartoDB.Positron") %>%
+        addPolygons(stroke = TRUE,
+                    color = "white",
+                    weight="",
+                    smoothFactor = 0.95,
+                    fillOpacity =~ 0.65,
+                    fillColor = ~cuts(data_sf_summary$plotdata)) %>% 
+        addCircleMarkers(data=i64_filtered,
+                         label=~Weather_Condition,
+                         lng = ~Start_Lng,
+                         lat = ~Start_Lat,
+                         weight = 3, 
+                         radius = 1, 
+                         color = ~time_colors(Sunrise_Sunset)) %>%
+        addLegend(pal = cuts, 
+            values = data_sf_summary$plotdata,
+            labFormat = labelFormat(suffix = " "),
+            opacity = 0.85, title = input$normalized, position = "topright") %>%
+        addLegend(pal = time_colors, 
+            values = i64_filtered$Sunrise_Sunset,
+            labFormat = labelFormat(suffix = " "),
+            opacity = 0.85, title = "Time of Day", position = "topright")
+      m
+    })   
+  )
+)
+```
+#### **Chart Caption**:  Accidents on I-64 along its length. States are colored by the number of accidents that took place based on the selected options. Each point on the map is one recorded accident. 
+*Note:* Deselecting both I-64 E and I-64 W (or both Day and Night) will cause the chart to error out. At least one box must be checked for each widget.
+
+## Discussion
+Interstate 64 (I64) travels across six states listed from most westward (left) to farthest eastward (right) Missouri, Illinois, Indiana, Kentucky, West Virginia, Virginia. 
+
+As one can observe from the graph, with all different levels of severities accounted for:
+
+- The highest accident count in each state for both I64 Eastbound and I64 Westbound forday or night ordered least to greatest include Illinois, Indiana, Missouri, Kentucky, West Virginia and Virginia. 
+- There is a greater accident count during the day versus at night for both I64 E and I64 W. 
+
+### Interesting/Unexpected Trends: 
+* Even though I64 only enters Missouri for a very short distance, whereas I64 spans the entire other 5 states, Missouri has more accidents on the highway than Illinois and Indiana. 
+  * This could be attributed to a general population of drivers on I-64 within the states. Comparing the two most populous and closest cities in Illinois and Missouri to I-64, the US Census Bureau populates St. Louis, Missouri around 301K people and Bellville, Illinois around 40.9K people over the last three years ^2^. 
+  * If curious about other populations of cities around the I64 interstate visit [Data Commons Place Explorer](https://datacommons.org/place). 
+* Another trend we discovered when severity level is set to a 3 and 4, Missouri’s accident count per mile of I-64 in its state surpasses West Virginia’s accident count. 
+
+Regardless of population differences, the end of a highway may correlate with more day and night accidents. 
+
+Populous cities tend to have the greatest number of accidents independent of Eastward or Westward bound or period of a full 24 hour span. 
+
+* A level of 4 severity is the *only* severity level that changes the accident count variation by state. 
+  * This level of severity causes the choropleth map shading to change. 
+  * The shades of color indicate the states to be ordered from least to most accident counts. 
+  * An accident with a level 4 severity creates the accident count in each state to be ordered from least to greatest based on their geography from West to East. 
+
+## Chart Justification
+#### Why did we choose a **choropleth map**? 
+
+A choropleth map is a type of thematic map that uses different shades or colors to represent data values of a particular variable across different geographic regions. It is commonly used to display data related to spatial patterns, such as population density, election results, or in this case, accident trends. Choropleth maps are particularly useful for visualizing accident trends as they provide a clear visual representation of how accident rates vary across different areas. By using color gradients or shades, choropleth maps can effectively convey the intensity or severity of accidents in different regions. They allow for easy identification of areas with higher or lower accident rates, which can help identify hotspots or areas of concern. Choropleth maps are commonly used by transportation departments, urban planners, and safety organizations to make informed decisions and implement targeted interventions to improve road safety in specific areas.
+
+#### Why did we choose these specific **widgets** deployed by **Shiny** for our report?
+The researchers coded 4 unique widgets. 
+
+1. A coded slider input widget from shiny allows someone to analyze the severity of accident levels of I64 accident count. 
+  * It is important to code a slider input as it allows someone to indicate if they want all the severity levels, just one severity level, or a few at the same time. 
+  * The severity level allowed us to find a unique trend that the severity level of 4 accidents caused a change in the distribution of data. 
+    * The severity level change did not affect where traffic safety precautions need to be implemented. 
+    * However, it did show that accidents in Missouri are actually less severe, and therefore even though there are delays either drivers or the physical safety precautions of I64 in Missouri correlate with less severe delays and accidents. 
+    * Therefore, companies may be able to see what safety precautions the Missouri roads have to implement and enforce safer driving behaviors in the states that have more severe accident reporting.
+2. A coded checkbox widget to allow the observation of traffic incidents from either Westbound or Eastbound on I64. 
+  * We chose to do a checkbox to allow for both directions of I64 data points to be observed on the map, but also create the ability to limit the data points to one specific direction. 
+  * This widget allowed us to see that there were more accidents traveling Eastbound than Westbound at Day or at Night at all varying severities. 
+3. A coded checkbox widget to allow the observation of traffic incidents indicated by if it occurred before the sunset or after the sunset. 
+  * We chose to create a checkbox widget for day versus night accidents to see if limiting one or the other had an effect on traffic accident count. 
+  * It is obvious that when severity is not a factor there are more traffic incidents during the day versus at night because more people are awake and use roads during the day than at night. 
+  * We found that when the severity is set to a level of four, this evened out the number of accidents between night versus day data points for I64. 
+    * Driving at night can be more difficult due to visibility or tiredness. 
+    * It is important to look at these trends and figure out ways for those who have jobs that cause long night hours to see where visibility or accidents occur the most often. 
+4. The last coded widget implemented radio buttons to allow the user to see the number of accidents per mile compared to the total accident count. 
+  * Radio Buttons are colloquially called online single choice answers. 
+  * This was created by taking the total accidents divided by the number of miles within a state. 
+
+
+## Question 2 
+### How does differing weather conditions affect Charlottesville road traffic?
+
+```{r}
+normalized_charlottesville<- read_csv("cville_accidents.csv")
+normalized_charlottesville<-normalized_charlottesville%>%
+  ## converting start time to a date type
+  mutate(Start_Time=as.POSIXct(Start_Time))%>%
+  ##converting end time to a date type
+  mutate(End_Time=as.POSIXct(End_Time))
+
+## more piping, creating a traffic duration column which contains the total time the traffic lasted in that instance
+normalized_charlottesville<-normalized_charlottesville%>%
+  mutate(traffic_duration = difftime(End_Time,Start_Time,units = "hours"))
+
+
+normalized_charlottesville$Weather_Condition<-as.factor(normalized_charlottesville$Weather_Condition)
+#unique(normalized_charlottesville$Weather_Condition)
+normalized_charlottesville$Weather_Condition<-fct_collapse(normalized_charlottesville$Weather_Condition,
+                                                           "Fair" = c("Partly Cloudy","Overcast","Mostly Cloudy","Fair","Clear","Fair / Windy","Scattered Clouds","Cloudy"),
+                                                           "Light Storm" = c("Light Rain","Rain","Light Rain with Thunder","Light Thunderstorms and Rain","Thunder in the Vicinity"),
+                                                           "Heavy Storm" = c("Thunderstorm","Heavy Rain","Thunder","T-Storm","Heavy T-Storm"),
+                                                           "Winter Storm" = c("Light Snow","Wintry Mix","Sleet","Light Freezing Rain"),
+                                                           "Haze/Fog"=c("Haze","Fog"))
+# dropping 6hrs, we drop 6hr as that is the default prediction when the individual does not know how long the traffic lasted
+valid_traffic_duration<- normalized_charlottesville[normalized_charlottesville$traffic_duration!=6,]
+
+```
+
+```{r}
+
+fluidPage(
+  fluidRow(
+    column(4,
+      selectInput(
+        "weather", label = "Weather",
+        choices = unique(na.omit(valid_traffic_duration$Weather_Condition)), selected = 'Fair'
+      )
+    ),
+    column(4,
+      sliderInput("year", label = "Year", sep = "",
+        min = 2018, max = 2021, value = c(2018, 2021))
+    ),
+    column(4,
+      sliderInput("trafficfilter", label = "Traffic Hours",
+        min = 0, max = 440, value = c(0, 440))
+    )
+
+  ),
+  
+  hr(),
+  
+  fluidRow(
+    renderLeaflet({
+    
+      # create a year column
+      valid_traffic_duration$year <- as_datetime(valid_traffic_duration$Start_Time) %>% format(format = "%Y") %>% as.integer()
+      
+      # filter data by year
+      valid_traffic_duration <- valid_traffic_duration[valid_traffic_duration$year >= input$year[1], ]
+      valid_traffic_duration <- valid_traffic_duration[valid_traffic_duration$year <= input$year[2], ]
+      
+      #View(valid_traffic_duration)
+      
+      fair_weather_top_traffic_streets<- valid_traffic_duration%>%
+        ## Top traffic streets when weather was fair / no precipitation
+        mutate(Street = gsub(" ","",Street))%>%
+        filter(Weather_Condition=="Fair")%>%
+        group_by(Street)%>%
+        summarise(TotalTrafficHours = sum(traffic_duration),Weather_Condition="Fair")%>%
+        arrange(desc(TotalTrafficHours))
+      
+      
+      
+      LightStorm_top_traffic_streets<- valid_traffic_duration%>%
+        ## Top traffic streets impacted by Light Storms
+        mutate(Street = gsub(" ","",Street))%>%
+        filter(Weather_Condition=="Light Storm")%>%
+        group_by(Street)%>%
+        summarise(TotalTrafficHours = sum(traffic_duration),Weather_Condition="Light Storm")%>%
+        arrange(desc(TotalTrafficHours))
+      
+        HeavyStorm_top_traffic_streets<- valid_traffic_duration%>%
+        ## top traffic streets impacted by Heavy Storms
+        mutate(Street = gsub(" ","",Street))%>%
+        filter(Weather_Condition=="Heavy Storm")%>%
+        group_by(Street)%>%
+        summarise(TotalTrafficHours = sum(traffic_duration),Weather_Condition="Heavy Storm")%>%
+        arrange(desc(TotalTrafficHours))
+      
+        
+        WinterStorm_top_traffic_streets<- valid_traffic_duration%>%
+        ## Top traffic streets impacted by Winter Weather
+        mutate(Street = gsub(" ","",Street))%>%
+        filter(Weather_Condition=="Winter Storm")%>%
+        group_by(Street)%>%
+        summarise(TotalTrafficHours = sum(traffic_duration),Weather_Condition="Winter Storm")%>%
+        arrange(desc(TotalTrafficHours))
+        
+        HazeFog_top_traffic_streets<- valid_traffic_duration%>%
+        ## Top traffic streets impacted by Haze and Fog
+        mutate(Street = gsub(" ","",Street))%>%
+        filter(Weather_Condition=="Haze/Fog")%>%
+        group_by(Street)%>%
+        summarise(TotalTrafficHours = sum(traffic_duration),Weather_Condition="Haze/Fog")%>%
+        arrange(desc(TotalTrafficHours))
+      
+      lats_and_longs<- normalized_charlottesville[,c(5:8,12)]
+      
+      
+      ## checkboxes 
+      combined_weather_df<-fair_weather_top_traffic_streets%>%
+        rbind(HazeFog_top_traffic_streets)%>%
+        rbind(WinterStorm_top_traffic_streets)%>%
+        rbind(HeavyStorm_top_traffic_streets)%>%
+        rbind(LightStorm_top_traffic_streets)
+      
+      
+      # add lats and longs
+      no_repeats<-lats_and_longs%>%
+        mutate(Street = gsub(" ","",Street))%>%
+        distinct(Street,.keep_all=TRUE)
+      
+      
+      #combine now 
+      
+      new_and_improved<- merge(combined_weather_df,no_repeats,by ="Street")
+      new_and_improved<-new_and_improved%>%
+        mutate(Display = paste(Street,format(TotalTrafficHours, digits=2),sep = ": "))%>%
+        #mutate(Display = paste(Display,"Hours"),sep = " ") %>%
+        mutate(TotalTrafficHours = as.numeric(TotalTrafficHours))
+      new_and_improved
+      
+      # Filter by traffic hours
+      new_and_improved <- new_and_improved[new_and_improved$TotalTrafficHours >= input$trafficfilter[1], ]
+      new_and_improved <- new_and_improved[new_and_improved$TotalTrafficHours <= input$trafficfilter[2], ]
+      
+      cuts2 <- quantile(new_and_improved$TotalTrafficHours, probs = seq(0, 1, .125))
+      cuts2 <- colorBin("YlOrRd", domain = new_and_improved$TotalTrafficHours, bins = cuts2)
+      
+      cville_coords <- new_and_improved
+      
+      unzip("cville_boundary.zip", exdir = "cville_boundary")
+      cville_geo <- readOGR("cville_boundary/municipal_boundary_area_04_06_2023.shp",
+                            layer = "municipal_boundary_area_04_06_2023")
+      
+      shapeData <- spTransform(cville_geo, CRS("+proj=longlat +datum=WGS84 +no_defs"))
+      
+      cville_coords <- cville_coords[cville_coords$Weather_Condition == input$weather, ]
+        
+      leaflet(cville_coords) %>% 
+        addProviderTiles("CartoDB.Positron") %>%
+        setView(-78.47, 38.02, zoom = 10) %>% 
+        addPolygons(data=shapeData,
+                        stroke = TRUE,
+                        color = "white",
+                        weight="",
+                        smoothFactor = 0.95,
+                        fillOpacity =~ 0.65,
+                        fillColor = "mediumseagreen") %>% 
+        addCircleMarkers(label=~Display,
+                         lng = ~Start_Lng,
+                         lat = ~Start_Lat,
+                         weight = 3, 
+                         radius = 3,
+                         stroke = FALSE,
+                         fillOpacity = ~1,
+                         color = "white",
+                         fillColor = ~cuts2(cville_coords$TotalTrafficHours)) %>%
+        addLegend(pal = cuts2, 
+                         values = cville_coords$TotalTrafficHours,
+                         labFormat = labelFormat(suffix = " "),
+                         opacity = 0.85, title = "Total traffic hours", position = "topright")
+    
+    })
+  )
+)
+```
+#### **Chart Caption**: The green box overlaid on the map marks the city limits of Charlottesville. The color of the dots vary by total traffic time and the data is collected from years 2018-2021. 
+*Note:* Selecting a time range with no data points will cause the chart to error out. Reset both time sliders and try again.
+
+## Discussion 
+As University of Virginia students, most of us drive around Charlottesville, Virginia on a regular basis.
+We wanted to observe traffic patterns in and around Charlottesville by observing which are the most accident-prone
+streets and how different weather conditions may impact traffic on these streets. The map shows an outline of the
+city of Charlottesville and includes accidents within the “KCHO” airport code (The Charlottesville-Albemarle Airport).
+
+As one can observe from the graph:
+
+* Emmet Street and Seminole Trail are the same road but differentiated as Emmet Street being within Charlottesville city limits and Seminole Trail being outside. Between 2018-2021 with fair weather, this road had 401.57 hours of traffic (Emmet Street with 55.76 hours and Seminole Trail with 345.81 hours).
+* Richmond Road is another major road that feeds into Charlottesville  with notably high traffic hours with 169.81 total traffic hours from 2018-2021 under fair weather conditions. Accidents/traffic is reported on Richmond Road for all weather conditions from the years 2018-2021, indicating that Richmond Road is a dangerous road to drive on for all weather conditions.
+* In general (for all weather conditions and years), traffic in Charlottesville is clustered in the northwestern part of Charlottesville (Emmet Street, US-29N, Angus Road, Holiday Drive, as some examples). 
+
+### Interesting/Unexpected Trends:
+
+* By examining minor roads that merge onto Emmet Street and Seminole Trail, there are many reported accidents/traffic hours at merge areas between major and minor roads. Likely, this is a major contributor to the traffic buildup that occurs on Emmet Street/Seminole Trail.
+* Some intersecting roads with accidents that occur at the merge area are US-29N (31.13 hours), Angus Road (11.88 hours), and Premier Circle (9.73 hours) from 2018-2021 with fair weather. Accidents that occur at these merge areas can have traffic spill over to Emmet Street and Seminole Trail.
+* Under haze/fog weather conditions, the only street with reported traffic in Charlottesville is 250 Byp with 11.86 hours of traffic from 2018-2021 (250 Byp had 12.93 hours of traffic under fair conditions, the most common weather phenomena). Indicating that 250 Byp may be an unsafe road to drive on under haze/fog conditions.
+* From 2018-2021, US-29N was the most trafficky road in Charlottesville under light storm weather conditions with 14.84 hours of traffic (exceeding Emmet Street which had 11.15 hours of traffic). This indicates that US-29N is a notably unsafe road to drive on in stormy conditions.
+* From 2018-2021, Stony Point Road becomes the road with the most reported traffic hours under heavy storm weather conditions. Although Stony Point Road is a relatively highly trafficked road in general, only under heavy storm conditions it is the most trafficked road.
+
+Nationally, around 40% of all accidents and over 50% of fatal/injury crashes occur at intersections ^3,4^. This may mean that not only are there more accidents or traffic hours at intersections, but they also tend to be more serious and harmful.
+
+* For more information regarding accidents at intersections, visit [US Department of Transportation](https://highways.dot.gov/research/research-programs/safety/intersection-safety) and [AutoAccident](https://www.autoaccident.com/statistics-on-intersection-accidents.html).
+
+It is important to note that Emmet Street/Seminole Trail is a major/heavily used road. This most likely plays an important factor in the high traffic hours on those roads.
+
+#### Two Most Severe Accidents in C-Ville Limits Occur at Same Intersection
+Interestingly, the longest accident reported in the city limits of Charlottesville occurred twice in the same area on Emmett Street near the corner of Hydraulic Road and Seminole Trail intersection in 2020 and 2021. In 2020, it caused a delay of around 55 hours. We found that Newsradio reported the horrific crash and its updates live that particular day. Two people were critically sent to the hospital, and police shut down Emmet road for the day. [Listen to the News Report](https://wina.com/news/064460-two-hurt-one-critically-in-emmet-street-crash/)^5^.
+
+## Chart Justification
+
+#### Why did we choose a **scatter plot**? 
+
+We chose to overlay a scatter plot over a geometric map of Charlottesville, Virginia (Shows the area that Charlottesville covers). Each point on the map represents a street and provides information on street name and total traffic hours based on year range and the weather condition selected. We chose each point on the graph to correlate to each street rather than each accident to be able to get more easily digestible information on which streets are the most dangerous for each weather condition. By also using a color scale to differentiate streets with a high/low traffic intensity, areas and streets that have a high accident/traffic rate can clearly be identified. By using a scatter plot and a color gradient, areas of high accident/traffic intensity are clearly shown. Overlaying a scatter plot over a geometric plot is helpful in showing individual traffic patterns per street and also to see general geometric traffic patterns in the entire Charlottesville city.
+
+#### Why did we choose these specific **widgets** deployed by **Shiny** for our report?
+
+The researchers coded three unique widgets.
+
+1. A coded dropdown menu for selecting weather conditions. 
+  * This feature is important for allowing someone to differentiate by weather condition as data and trends change based on the selected weather. An individual might want to know what roads are more dangerous in a particular weather condition. 
+  * The researchers believed the drop down menu was the most organic way to allow the end user to select the weather        condition. 
+  * After discussion, the researchers decided to not stack weather conditions on top of one another as it was believed it would muddle trends. Thus, we eliminated the checkbox widget. 
+  * Deciding between radio buttons and the dropdown menu came down to what was more aesthetically pleasing for the chosen map. 
+  * The weather dropdown menu allowed us to spot unique trends in the data.
+    + The major volume roads such as Seminole Trail and Emmet Street, I-64, etc all maintained high volume no matter the condition. However when the weather conditions change, some roads such as Monacan Trail show higher volume compared to other weather conditions. Thus indicating these roads are more dangerous relatively in inclement weather.
+2. A coded slider input widget from shiny to specify the range of year being observed
+  * The researchers believed this feature was important as it allowed the end user to indicate a specified range of the data being displayed. Whether that be one year or the full four year range
+  * The researchers believed the year slider was easy and natural to use for the end user, allowing for a specific or generalized range of the data over the years.
+3. A slider input to filter the range of traffic hours of the streets being displayed.
+  * The researchers believed this feature to be important as it allows someone to filter the roads being displayed to specific intervals of traffic hours. Filtering the streets by traffic hours allow the end user to look at desired traffic hour ranges
+  * A slider was used as it allows the end user to be very specific  with the filtering of the streets to their desired range.
+
+
+## Conclusion 
+
+Both I-64 and the various city streets of Charlottesville reveal unexpected trends in driving accidents. The choropleth map allowed for greatest efficacy to visualize and report the accident data spanning 4 different states. I-64 shows the total accident count is greatest in the state of Virginia regardless of severity, day or night traffic, or accidents per mile ratio. This again should shock our minds as it is an interstate UVA students drive everyday in Charlottesville, and to travel to other popular cities in the state of Virginia. 
+
+There should be some traffic considerations and/or behavioral changes implemented among drivers/or traffic patrollers to ensure safety within the Charlottesville road system. Inside and outside the city limits of Charlottesville, Seminole Trail and Emmet Street had the highest traffic accident count in hours on fair weather days. This may be attributable to traffic spills from smaller side streets merging to these roads. Inside the city limit, the corner intersection of Barrack’s where the local Charlottesville CVS, Bank of America, CAVA, and Barrack’s shopping center meet is where two of the greatest accidents have occurred. This should cause concern for barriers of visibility at the junctions because the accidents occurred on fair reported weather days. However, when the weather condition varied from a fair to other limiting weather conditions such as haze/fog or storms, the highest traffic accident count per hour was 250 Byp and Stony Point Road, respectively. This indicates that there are some roads inside and around Charlottesville that are especially dangerous to drive on as the weather changes. 
+
+## References 
+[1] Moosavi, SobHan. (2021). US Accidents (2016-2021), Retrieved April 24, 2023 from https://www.kaggle.com/datasets/sobhanmoosavi/us-accidents.
+
+[2] “Place Explorer.” Place Explorer - Data Commons, Google LLC, 2021, https://datacommons.org/place. 
+
+[3] Smith, Edward A. “Statistics on Intersection Accidents.” Sacramento Personal Injury Lawyer - AutoAccident.com, 2023, https://www.autoaccident.com/statistics-on-intersection-accidents.html. 
+
+[4] “Two hurt, one critically, in Emmet Street crash” Newsradio: Saga Communications Wina, 2020. 
+https://wina.com/news/064460-two-hurt-one-critically-in-emmet-street-crash/. 
+
+[5] “Intersection Safety.” Intersection Safety | FHWA, 26 Aug. 2021, https://highways.dot.gov/research/research-programs/safety/intersection-safety. 
